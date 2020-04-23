@@ -1,0 +1,193 @@
+*******************************************************************************
+*  Program XDEMO.SETUP
+*  Copyright Rocket Software, Rocket U2 (C) 2016
+*  Description: Perform initial basic compiles, python, sql steps, define login pa, then remove myself
+*******************************************************************************
+*  Version History
+*	1.02 - UDT-15238 - Check for uninitialized UDT account, run !updatevoc if needed, add clean.account warning (03/06/16)
+*	1.01 - UNV-23664 - Check for uninitialized UV account, run UPDATE.ACCOUNT if needed (02/29/16)
+*	1.00 - Production release (11/16/2015)
+*****************************************************************************
+* Set Version Variables
+PROGVERSION = "1.02"
+PROGDATE = "03/06/2016"
+
+* To enable debug mode, either create a 'XDEMO.DEBUG' record in VOC or XDBP files
+
+GOSUB INITIALIZATION;* Initialization First
+
+* Run UPDATE.ACCOUNT before hush in case there is an error
+READ REC FROM VOC,"LIST" ELSE REC = ""
+IF DBMSTYPE = "UV" THEN 
+  * UPDATE.ACCOUNT is done first as CREATE.FILE and other commands don't exist yet
+  * Initilized Account (UV)? - LIST record isn't included by default
+  IF REC = "" THEN
+    EXECUTE "UPDATE.ACCOUNT"
+    EXECUTE "CLEAR.FILE &TEMP&" CAPTURING JUNK
+    * Check again for record
+    READ REC FROM VOC,"LIST" ELSE REC = ""
+    IF REC = "" THEN
+      CRT ""
+      CRT "UPDATE.ACCOUNT process failed, please investigate."
+    END
+  END
+  EXECUTE "LONGNAMES ON"
+END ELSE
+  * UniData updates for the VOC file
+  IF REC = "" THEN
+    CMD = OSCMD:DBHOME:SLASH:"bin":SLASH:"updatevoc"
+    EXECUTE CMD CAPTURING JUNK
+    * Check again for record
+    READ REC FROM VOC,"LIST" ELSE REC = ""
+    IF REC = "" THEN
+      CRT ""
+      CRT "!updatevoc process failed, please investigate."
+    END
+  END  
+END
+
+* Check for prod mode again (done after UV's update.account)
+GOSUB CHECK.PROD.MODE
+
+* Hush Output
+IF PROD.MODE THEN HUSH ON
+
+* Compile basic programs
+EXECUTE "RECATALOG.XDEMO"
+
+* Compile python programs (if found)
+FOUND.PYTHON = 1
+OPENSEQ DBHOME:SLASH:".pyconfig" TO PYCONFIG ELSE FOUND.PYTHON = 0
+CLOSESEQ PYCONFIG
+IF FOUND.PYTHON THEN
+  READ REC FROM VOC,"RECATALOG.XDEMO.PYTHON" ELSE REC = ""
+  IF REC # "" THEN
+    EXECUTE "RECATALOG.XDEMO.PYTHON"
+  END ELSE
+    IF PROD.MODE THEN HUSH OFF
+    CRT "Python is installed, but RECATALOG.XDEMO.PYTHON command wasn't found!"
+    IF PROD.MODE THEN HUSH ON
+  END
+END
+
+* Add Char 10's to end of MEMBER records field 15 & 19 so decrypt.example works
+EXECUTE "SELECT MEMBERS" CAPTURING JUNK
+OPEN "","MEMBERS" TO MEMBERS ELSE STOP "OPEN MEMBERS ERROR"
+DONE = 0;REC.ID = ""
+CNT = 0;CHANGED.RECS = 0
+LOOP
+  MY.REC = ""
+  READNEXT REC.ID FROM 0 ELSE DONE = 1
+UNTIL DONE
+  READ MY.REC FROM MEMBERS,REC.ID ELSE MY.REC = ""
+  ORIG.MY.REC = MY.REC
+  IF MY.REC # "" THEN
+    FOR C = 1 TO DCOUNT(MY.REC<15>,CHAR(253))
+      START.VAL = MY.REC<15,C>
+      IF SEQ(START.VAL[LEN(START.VAL),1]) # "10" THEN
+        MY.REC<15,C> := CHAR(10)
+      END
+    NEXT C
+    FOR C = 1 TO DCOUNT(MY.REC<19>,CHAR(253))
+      START.VAL = MY.REC<19,C>
+      IF SEQ(START.VAL[LEN(START.VAL),1]) # "10" THEN
+        MY.REC<19,C> := CHAR(10)
+      END
+    NEXT C
+    IF MY.REC # ORIG.MY.REC THEN 
+      CHANGED.RECS += 1
+      WRITE MY.REC ON MEMBERS,REC.ID ON ERROR NULL
+    END
+  END
+REPEAT
+CRT "Number of MEMBERS records changed: ":CHANGED.RECS
+
+* For UniData run convert.sql
+IF DBMSTYPE = "UD" THEN EXECUTE "CONVERT.SQL.XDEMO"
+
+* Replace the LOGIN paragraph
+EXECUTE "DELETE VOC LOGIN"
+REC = ""
+REC<-1> = "PA"
+REC<-1> = "DISPLAY"
+REC<-1> = "DISPLAY Welcome to the XDEMO Account"
+REC<-1> = "XDEMO.VERSION"
+REC<-1> = "DISPLAY"
+WRITE REC ON VOC,"LOGIN" ON ERROR NULL
+
+* Remove myself
+EXECUTE "DELETE XDBP XDEMO.SETUP"
+IF DBMSTYPE = "UV" THEN
+  EXECUTE "DELETE XDBP.O XDEMO.SETUP"
+END ELSE
+  EXECUTE "DELETE XDBP _XDEMO.SETUP"
+END
+
+* Finish
+IF PROD.MODE THEN HUSH OFF
+IF DBMSTYPE = "UV" THEN
+  * There is no way to automate CLEAN.ACCOUNT, provide recommendation instead.
+  CRT ""
+  CRT "If this is an upgrade, please run CLEAN.ACCOUNT manually."
+  CRT "CLEAN.ACCOUNT will resolve any pointers that may be out of sync."
+END
+CRT ""
+CRT "XDEMO Account setup is now complete!"
+CLOSE VOC
+CLOSE XDBP
+EXECUTE "LOGIN"
+
+STOP
+
+
+INITIALIZATION:
+   JUNK = @(0,0); * Fix for 'Press Any Key'
+   OPEN "","VOC" TO VOC ELSE STOP "OPEN VOC ERROR"   
+   OPEN "","XDBP" TO XDBP ELSE STOP "OPEN XDBP ERROR"
+   PROD.MODE = 1
+   GOSUB CHECK.PROD.MODE
+   * Check for valid XDEMO account
+   VALID.XDEMO = 1
+   READ REC FROM VOC,"XDEMO.VERSION" ELSE VALID.XDEMO = 0
+   IF NOT(VALID.XDEMO) THEN
+     IF PROD.MODE THEN 
+       IF PROD.MODE THEN HUSH OFF
+     END
+     CRT "This is not a valid XDEMO account, aborting this process!!"
+     STOP
+   END 
+   REC = ""
+   IF SYSTEM(9010)[1,2] = "UV" THEN 
+     DBMSTYPE = "UV"
+     OSTYPE = SYSTEM(91)  
+     DBHOME = SYSTEM(32)  
+     * Set OS TCL level command
+     IF OSTYPE THEN
+       * Windows
+       OSCMD = "DOS /c "
+     END ELSE
+       OSCMD = "SH -c "
+     END
+   END ELSE 
+     DBMSTYPE = "UD"
+     IF UPCASE(SYSTEM(33)) = "UNIX" THEN OSTYPE = 0 ELSE OSTYPE = 1
+     DBHOME = SYSTEM(31)
+     OSCMD = "!"
+   END  
+   IF OSTYPE THEN SLASH = "\" ELSE SLASH = "/"
+RETURN
+
+CHECK.PROD.MODE:
+   PROD.MODE = 0;* 1=Production;0=Debug
+   DEBUG.REC = ""
+   ROUND.TWO = 0
+   READ DEBUG.REC FROM VOC,"XDEMO.DEBUG" ELSE ROUND.TWO = 1
+   * Recheck for record in XDBP
+   IF ROUND.TWO THEN
+        READ DEBUG.REC FROM XDBP,"XDEMO.DEBUG" ELSE PROD.MODE = 1
+   END
+   IF NOT(PROD.MODE) THEN
+     CRT "Enabling debug mode in the xdemo setup program."
+   END
+RETURN
+
